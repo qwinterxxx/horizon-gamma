@@ -20,7 +20,7 @@ cargo horizon-mod check
 horizon-launcher native-build . --instance "<instance>" --trust-native-code
 ```
 
-Or download `gamma-1.0.0.hmod` from [Releases](https://github.com/pantyukovdimathanos-lab/horizon-gamma/releases) and verify its signature with [`horizon-mods.pub`](horizon-mods.pub):
+Or download `gamma-1.0.0.hmod` from [Releases](https://github.com/qwinterxxx/horizon-gamma/releases) and verify its signature with [`horizon-mods.pub`](horizon-mods.pub):
 
 ```sh
 minisign -Vm gamma-1.0.0.hmod -P RWQjqg8rypRO1FcAIBc+P7vxdFaU1fjCss8evaMaYSBDL21Fy12PGnH8
