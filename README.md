@@ -6,6 +6,7 @@ Ultra-lightweight native Gamma mod for [Horizon](https://github.com/horizon-rust
 
 - Press **G** (rebindable in **Options > Controls**) to toggle between `100%` and `1500%` gamma.
 - Toggle setting available in **Options > Mods > Gamma**.
+- Respects Horizon's external-server fullbright safeguard (`fullbright_held`): leaves normal vanilla brightness intact on external servers and LAN guest sessions, while remaining active in singleplayer, hosted LAN worlds, and Replay Studio.
 - Displays a brief status toast on toggle.
 - Zero allocations on idle frames; updates settings and renderer state only when gamma changes.
 
@@ -20,10 +21,10 @@ cargo horizon-mod check
 horizon-launcher native-build . --instance "<instance>" --trust-native-code
 ```
 
-Or download `gamma-1.0.0.hmod` from [Releases](https://github.com/qwinterxxx/horizon-gamma/releases) and verify its signature with [`horizon-mods.pub`](horizon-mods.pub):
+Or download `gamma-1.0.1.hmod` from [Releases](https://github.com/qwinterxxx/horizon-gamma/releases) and verify its signature with [`horizon-mods.pub`](horizon-mods.pub):
 
 ```sh
-minisign -Vm gamma-1.0.0.hmod -P RWQjqg8rypRO1FcAIBc+P7vxdFaU1fjCss8evaMaYSBDL21Fy12PGnH8
+minisign -Vm gamma-1.0.1.hmod -P RWQjqg8rypRO1FcAIBc+P7vxdFaU1fjCss8evaMaYSBDL21Fy12PGnH8
 ```
 
 ## License
