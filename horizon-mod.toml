@@ -1,0 +1,40 @@
+id = "gamma"
+name = "Gamma"
+version = "1.0.0"
+description = "Ultra-lightweight Gamma toggle between 100% and 1500%."
+license = "MIT"
+api = "0.2"
+side = "client"
+capabilities = ["registries"]
+
+[native]
+game = "26.3"
+horizon = "0a875da91dbb0fdcb7ba8c42c11341aa229af51a"
+mixins = "e59da9094f0c2fdda6c627fe9eff22dec6a906f0"
+
+[[native.bridge]]
+id = "settings"
+kind = "GET_MUT"
+target = "horizon_client::game::Game"
+member = "settings"
+
+[[native.bridge]]
+id = "renderer"
+kind = "GET_MUT"
+target = "horizon_client::game::Game"
+member = "renderer"
+
+[[native.bridge]]
+id = "message"
+kind = "GET_MUT"
+target = "horizon_client::game::Game"
+member = "message"
+
+[[native.mixin]]
+id = "tick_gamma"
+target = "horizon_client::game::render_tick::Game::tick_frame_visuals"
+kind = "HEAD"
+helper = "src/mixins/tick_gamma.rs"
+bindings = [
+  { name = "game", ty = "&mut Game<'_>", value = "self" },
+]
