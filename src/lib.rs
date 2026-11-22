@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::Instant;
 
 use mod_api::{
@@ -10,7 +10,7 @@ const ID: &str = "gamma";
 const KEY_TOGGLE: &str = "toggle";
 const SETTING_ENABLED: &str = "enabled";
 
-pub const GAMMA_LOW: f32 = 1.0;
+pub const DEFAULT_NORMAL_GAMMA: f32 = 0.5;
 pub const GAMMA_HIGH: f32 = 15.0;
 const GAMMA_VANILLA_MAX: f32 = 1.0;
 
@@ -24,65 +24,78 @@ static INITIALIZED: AtomicBool = AtomicBool::new(false);
 static BOOSTED: AtomicBool = AtomicBool::new(false);
 static HELD: AtomicBool = AtomicBool::new(false);
 static BOOST_APPLIED: AtomicBool = AtomicBool::new(false);
-static SAVED_NORMAL_BITS: AtomicU32 = AtomicU32::new(GAMMA_LOW.to_bits());
 static PENDING: AtomicU8 = AtomicU8::new(PENDING_NONE);
 
 #[derive(Default)]
 struct Mod;
 
-fn saved_normal_gamma() -> f32 {
-    let g = f32::from_bits(SAVED_NORMAL_BITS.load(Ordering::Relaxed));
-    if g.is_finite() {
-        g.clamp(0.0, GAMMA_VANILLA_MAX)
+fn normal_gamma(settings_gamma: f32) -> f32 {
+    if settings_gamma.is_finite() && (0.0..=GAMMA_VANILLA_MAX).contains(&settings_gamma) {
+        settings_gamma
     } else {
-        GAMMA_LOW
+        DEFAULT_NORMAL_GAMMA
     }
 }
 
-fn remember_normal_gamma(current: f32) {
-    if current.is_finite() && (0.0..=GAMMA_VANILLA_MAX).contains(&current) {
-        SAVED_NORMAL_BITS.store(current.to_bits(), Ordering::Relaxed);
+fn restore_action(
+    settings_gamma: f32,
+    renderer_gamma: Option<f32>,
+    notice: Option<&'static str>,
+    force_check: bool,
+) -> Option<GammaAction> {
+    let was_applied =
+        BOOST_APPLIED.load(Ordering::Relaxed) && BOOST_APPLIED.swap(false, Ordering::Relaxed);
+    let over_vanilla = renderer_gamma.is_some_and(|rg| rg > GAMMA_VANILLA_MAX);
+    let target = normal_gamma(settings_gamma);
+    let needs_restore = (was_applied || over_vanilla || force_check)
+        && renderer_gamma.is_some_and(|rg| rg != target);
+
+    if needs_restore || notice.is_some() {
+        Some(GammaAction {
+            gamma: needs_restore.then_some(target),
+            notice,
+        })
+    } else {
+        None
     }
 }
 
-/// Updates the target gamma state (`100%` or `1500%`) and schedules a one-shot apply/toast.
+/// Updates the target boost state (`1500%` or normal) and schedules a one-shot apply/toast.
 pub fn set_boosted(enabled: bool, notify: bool) {
     BOOSTED.store(enabled, Ordering::Relaxed);
     let pending = match (enabled, notify) {
         (true, true) => PENDING_NOTIFY_HIGH,
-        (true, false) => PENDING_APPLY,
         (false, true) => PENDING_NOTIFY_LOW,
-        (false, false) => PENDING_APPLY,
+        (_, false) => PENDING_APPLY,
     };
     PENDING.store(pending, Ordering::Relaxed);
 }
 
-/// Resets internal state for tests or reinitialization.
 #[cfg(test)]
-fn reset_state_for_tests(normal_gamma: f32) {
+fn reset_state_for_tests() {
     INITIALIZED.store(false, Ordering::Relaxed);
     BOOSTED.store(false, Ordering::Relaxed);
     HELD.store(false, Ordering::Relaxed);
     BOOST_APPLIED.store(false, Ordering::Relaxed);
-    SAVED_NORMAL_BITS.store(normal_gamma.clamp(0.0, GAMMA_VANILLA_MAX).to_bits(), Ordering::Relaxed);
     PENDING.store(PENDING_NONE, Ordering::Relaxed);
 }
 
-/// Target gamma / toast update for the render thread, or `None` when idle.
+/// Target renderer gamma / toast update for the render thread, or `None` when idle.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GammaAction {
     pub gamma: Option<f32>,
     pub notice: Option<&'static str>,
 }
 
-/// Computes the gamma update right after Horizon's `hold_fullbright()` check.
+/// Computes the renderer-only gamma update right after Horizon's `hold_fullbright()` check.
 ///
-/// When `fullbright_held` is `true` (external servers / another player's LAN world), boosted gamma
-/// is never applied: any previously boosted value is restored to the pre-boost normal brightness,
-/// and vanilla brightness values (`0.0..=1.0`) are left completely untouched.
+/// Only `renderer.gamma` is ever changed; `settings.gamma` (`options.txt`) is read-only so the
+/// player's configured brightness survives options saves while boosted and mod removal never leaves
+/// `15.0` persisted in `options.txt`. Turning the boost off or joining an external server restores
+/// `renderer.gamma` to the player's configured `settings_gamma`.
 pub fn take_gamma_action(
     fullbright_held: bool,
-    current_gamma: f32,
+    settings_gamma: f32,
     renderer_gamma: Option<f32>,
 ) -> Option<GammaAction> {
     if HELD.load(Ordering::Relaxed) != fullbright_held {
@@ -98,32 +111,19 @@ pub fn take_gamma_action(
     if fullbright_held {
         let notice = (pending == PENDING_NOTIFY_HELD)
             .then_some("Gamma: disabled on external servers");
-        let was_applied = BOOST_APPLIED.swap(false, Ordering::Relaxed);
-        let over_vanilla = current_gamma > GAMMA_VANILLA_MAX
-            || renderer_gamma.is_some_and(|rg| rg > GAMMA_VANILLA_MAX);
-
-        if was_applied || over_vanilla {
-            return Some(GammaAction {
-                gamma: Some(saved_normal_gamma()),
-                notice,
-            });
-        }
-
-        return notice.map(|n| GammaAction { gamma: None, notice: Some(n) });
+        return restore_action(settings_gamma, renderer_gamma, notice, false);
     }
 
-    let boosted = BOOSTED.load(Ordering::Relaxed);
-    if boosted {
-        if !BOOST_APPLIED.swap(true, Ordering::Relaxed) {
-            remember_normal_gamma(current_gamma);
+    if BOOSTED.load(Ordering::Relaxed) {
+        if !BOOST_APPLIED.load(Ordering::Relaxed) {
+            BOOST_APPLIED.store(true, Ordering::Relaxed);
         }
         let notice = match pending {
             PENDING_NOTIFY_HIGH => Some("Gamma: 1500%"),
             PENDING_NOTIFY_HELD => Some("Gamma: disabled on external servers"),
             _ => None,
         };
-        let needs_write = current_gamma != GAMMA_HIGH
-            || renderer_gamma.is_some_and(|rg| rg != GAMMA_HIGH);
+        let needs_write = renderer_gamma.is_some_and(|rg| rg != GAMMA_HIGH);
         if needs_write || notice.is_some() {
             return Some(GammaAction {
                 gamma: needs_write.then_some(GAMMA_HIGH),
@@ -133,45 +133,32 @@ pub fn take_gamma_action(
         return None;
     }
 
-    BOOST_APPLIED.store(false, Ordering::Relaxed);
-    match pending {
-        PENDING_NOTIFY_LOW => Some(GammaAction {
-            gamma: Some(GAMMA_LOW),
-            notice: Some("Gamma: 100%"),
-        }),
-        PENDING_APPLY => Some(GammaAction {
-            gamma: Some(GAMMA_LOW),
-            notice: None,
-        }),
-        PENDING_NOTIFY_HELD => Some(GammaAction {
-            gamma: None,
-            notice: Some("Gamma: disabled on external servers"),
-        }),
+    let notice = match pending {
+        PENDING_NOTIFY_LOW => Some("Gamma: OFF"),
+        PENDING_NOTIFY_HELD => Some("Gamma: disabled on external servers"),
         _ => None,
-    }
+    };
+    let force_check = matches!(pending, PENDING_NOTIFY_LOW | PENDING_APPLY);
+    restore_action(settings_gamma, renderer_gamma, notice, force_check)
 }
 
-/// Applies the pending gamma update to explicit fields (used by tests).
+/// Applies the pending render-only gamma update (used by unit tests).
 pub fn apply_gamma(
     fullbright_held: bool,
-    s_gamma: &mut f32,
+    settings_gamma: f32,
     mut r_gamma: Option<&mut f32>,
     message: &mut Option<(String, Instant)>,
 ) {
     let renderer_val = r_gamma.as_deref().copied();
-    let Some(action) = take_gamma_action(fullbright_held, *s_gamma, renderer_val) else {
+    let Some(action) = take_gamma_action(fullbright_held, settings_gamma, renderer_val) else {
         return;
     };
 
-    if let Some(gamma) = action.gamma {
-        if *s_gamma != gamma {
-            *s_gamma = gamma;
-        }
-        if let Some(rg) = r_gamma.as_deref_mut()
-            && *rg != gamma
-        {
-            *rg = gamma;
-        }
+    if let Some(gamma) = action.gamma
+        && let Some(rg) = r_gamma.as_deref_mut()
+        && *rg != gamma
+    {
+        *rg = gamma;
     }
     if let Some(notice) = action.notice {
         *message = Some((notice.to_owned(), Instant::now()));
@@ -245,76 +232,105 @@ mod tests {
 
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
-    fn lock_and_reset(normal_gamma: f32) -> MutexGuard<'static, ()> {
+    fn lock_and_reset() -> MutexGuard<'static, ()> {
         let guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        reset_state_for_tests(normal_gamma);
+        reset_state_for_tests();
         guard
     }
 
     #[test]
-    fn toggles_between_100_and_1500_percent() {
-        let _guard = lock_and_reset(0.5);
-        let mut s_gamma = 0.5_f32;
-        let mut r_gamma = 0.5_f32;
+    fn toggles_boost_and_restores_player_brightness() {
+        let _guard = lock_and_reset();
+        let settings_gamma = 0.75_f32;
+        let mut r_gamma = 0.75_f32;
         let mut message = None;
 
         // Idle when disabled does not alter vanilla brightness.
-        apply_gamma(false, &mut s_gamma, Some(&mut r_gamma), &mut message);
-        assert_eq!((s_gamma, r_gamma), (0.5, 0.5));
+        apply_gamma(false, settings_gamma, Some(&mut r_gamma), &mut message);
+        assert_eq!(r_gamma, 0.75);
         assert!(message.is_none());
 
+        // Enabling boosts only renderer.gamma; settings.gamma stays 0.75.
         set_boosted(true, true);
-        apply_gamma(false, &mut s_gamma, Some(&mut r_gamma), &mut message);
-        assert_eq!((s_gamma, r_gamma), (GAMMA_HIGH, GAMMA_HIGH));
-        assert_eq!(message.as_ref().map(|(t, _)| t.as_str()), Some("Gamma: 1500%"));
+        apply_gamma(false, settings_gamma, Some(&mut r_gamma), &mut message);
+        assert_eq!(r_gamma, GAMMA_HIGH);
+        assert_eq!(
+            message.as_ref().map(|(t, _)| t.as_str()),
+            Some("Gamma: 1500%")
+        );
 
         message = None;
-        apply_gamma(false, &mut s_gamma, Some(&mut r_gamma), &mut message);
+        apply_gamma(false, settings_gamma, Some(&mut r_gamma), &mut message);
         assert!(message.is_none());
-        assert_eq!((s_gamma, r_gamma), (GAMMA_HIGH, GAMMA_HIGH));
+        assert_eq!(r_gamma, GAMMA_HIGH);
 
+        // Disabling restores the player's own 0.75 brightness, not 1.0.
         set_boosted(false, true);
-        apply_gamma(false, &mut s_gamma, Some(&mut r_gamma), &mut message);
-        assert_eq!((s_gamma, r_gamma), (GAMMA_LOW, GAMMA_LOW));
-        assert_eq!(message.as_ref().map(|(t, _)| t.as_str()), Some("Gamma: 100%"));
+        apply_gamma(false, settings_gamma, Some(&mut r_gamma), &mut message);
+        assert_eq!(r_gamma, 0.75);
+        assert_eq!(message.as_ref().map(|(t, _)| t.as_str()), Some("Gamma: OFF"));
+    }
+
+    #[test]
+    fn non_default_brightness_survives_options_save_while_boosted() {
+        let _guard = lock_and_reset();
+        let settings_gamma = 0.35_f32;
+        let mut r_gamma = 0.35_f32;
+        let mut message = None;
+
+        set_boosted(true, true);
+        apply_gamma(false, settings_gamma, Some(&mut r_gamma), &mut message);
+        assert_eq!(r_gamma, GAMMA_HIGH);
+
+        // Simulate Horizon saving options.txt and calling apply_ui_settings() during boost.
+        let saved_to_options_txt = settings_gamma;
+        assert_eq!(saved_to_options_txt, 0.35);
+        r_gamma = settings_gamma;
+
+        // Next visual tick reapplies 15.0 to renderer only; saved setting stays 0.35.
+        message = None;
+        apply_gamma(false, settings_gamma, Some(&mut r_gamma), &mut message);
+        assert_eq!(r_gamma, GAMMA_HIGH);
+        assert_eq!(saved_to_options_txt, 0.35);
+        assert!(message.is_none());
     }
 
     #[test]
     fn respects_external_server_fullbright_restriction() {
-        let _guard = lock_and_reset(0.5);
-        let mut s_gamma = 0.5_f32;
-        let mut r_gamma = 0.5_f32;
+        let _guard = lock_and_reset();
+        let mut settings_gamma = 0.65_f32;
+        let mut r_gamma = 0.65_f32;
         let mut message = None;
 
-        // Boost in singleplayer; pre-boost normal brightness (0.5) is remembered.
         set_boosted(true, true);
-        apply_gamma(false, &mut s_gamma, Some(&mut r_gamma), &mut message);
-        assert_eq!((s_gamma, r_gamma), (GAMMA_HIGH, GAMMA_HIGH));
+        apply_gamma(false, settings_gamma, Some(&mut r_gamma), &mut message);
+        assert_eq!(r_gamma, GAMMA_HIGH);
 
-        // Joining an external server restores normal brightness (0.5) immediately.
+        // Joining external server restores player's 0.65 brightness immediately.
         message = None;
-        apply_gamma(true, &mut s_gamma, Some(&mut r_gamma), &mut message);
-        assert_eq!((s_gamma, r_gamma), (0.5, 0.5));
+        apply_gamma(true, settings_gamma, Some(&mut r_gamma), &mut message);
+        assert_eq!(r_gamma, 0.65);
         assert!(message.is_none());
 
-        // Changing vanilla brightness slider on external server stays intact (no overwrites).
-        s_gamma = 0.35;
-        r_gamma = 0.35;
-        apply_gamma(true, &mut s_gamma, Some(&mut r_gamma), &mut message);
-        assert_eq!((s_gamma, r_gamma), (0.35, 0.35));
+        // Adjusting vanilla brightness slider on external server stays intact.
+        settings_gamma = 0.25;
+        r_gamma = 0.25;
+        apply_gamma(true, settings_gamma, Some(&mut r_gamma), &mut message);
+        assert_eq!(r_gamma, 0.25);
 
-        // Attempting to notify/toggle while on external server leaves 0.35 intact.
+        // Toggle attempt on external server leaves 0.25 intact and shows toast.
         PENDING.store(PENDING_NOTIFY_HELD, Ordering::Relaxed);
-        apply_gamma(true, &mut s_gamma, Some(&mut r_gamma), &mut message);
-        assert_eq!((s_gamma, r_gamma), (0.35, 0.35));
+        apply_gamma(true, settings_gamma, Some(&mut r_gamma), &mut message);
+        assert_eq!(r_gamma, 0.25);
         assert_eq!(
             message.as_ref().map(|(t, _)| t.as_str()),
             Some("Gamma: disabled on external servers")
         );
 
-        // Leaving external server back to singleplayer restores the saved boost.
+        // Returning to singleplayer restores the active boost on renderer only.
         message = None;
-        apply_gamma(false, &mut s_gamma, Some(&mut r_gamma), &mut message);
-        assert_eq!((s_gamma, r_gamma), (GAMMA_HIGH, GAMMA_HIGH));
+        apply_gamma(false, settings_gamma, Some(&mut r_gamma), &mut message);
+        assert_eq!(r_gamma, GAMMA_HIGH);
+        assert_eq!(settings_gamma, 0.25);
     }
 }
