@@ -1,7 +1,7 @@
 id = "gamma"
 name = "Gamma"
-version = "1.0.1"
-description = "Ultra-lightweight Gamma toggle between 100% and 1500%."
+version = "1.0.2"
+description = "Ultra-lightweight Gamma boost toggle (1500%) that respects server limits and preserves options.txt."
 license = "MIT"
 api = "0.2"
 side = "client"
@@ -14,7 +14,7 @@ mixins = "e59da9094f0c2fdda6c627fe9eff22dec6a906f0"
 
 [[native.bridge]]
 id = "settings"
-kind = "GET_MUT"
+kind = "GET"
 target = "horizon_client::game::Game"
 member = "settings"
 
